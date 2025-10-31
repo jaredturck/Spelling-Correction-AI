@@ -1,4 +1,4 @@
-import torch, random, time, sys
+import torch, random, time, sys, os, datetime
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -8,10 +8,15 @@ charset = {chr(i) : n+1 for n,i in enumerate(range(32, 127))}
 UNK_ID = len(charset) + 1
 charset['<UNK>'] = UNK_ID
 
-MAX_SAMPLES = 200_000
+WEIGHTS_PATH = 'weights/'
+
+MAX_SAMPLES = 1_000_000
 CONTEXT_LEN = 64
 WORD_LEN = 16
+VOCAB_SIZE = max(charset.values()) + 1
 DEVICE = 'cuda'
+BATCH_SIZE = 16384
+TARGET_LOSS = 0.1
 
 class WikiDataset(Dataset):
     def __init__(self):
@@ -29,7 +34,15 @@ class WikiDataset(Dataset):
         x_word = pad_sequence(x_word, batch_first=True, padding_value=0)
         x_context = pad_sequence(x_context, batch_first=True, padding_value=0)
         y = pad_sequence(y, batch_first=True, padding_value=0)
-        return x_word, x_context, y
+
+        T = x_word.size(1)
+        if y.size(1) < T:
+            pad = torch.zeros(y.size(0), T - y.size(1))
+            y = torch.cat([y, pad], dim=1)
+        elif y.size(1) > T:
+            y = y[:, :T]
+
+        return x_word.long(), x_context.long(), y.long()
     
     def augment_text(self, text):
         
@@ -107,29 +120,36 @@ class SpellingModel(Module):
         Module.train(self, True)
         self.dataset = WikiDataset()
         self.dropout = 0.1
+        self.no_workers = os.cpu_count()//2
 
-        self.embedding = torch.nn.Embedding(len(charset)+1, WORD_LEN, padding_idx=0)
-        self.embedding_context = torch.nn.Embedding(CONTEXT_LEN, CONTEXT_LEN, padding_idx=0)
+        self.embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
+        self.embedding_context = torch.nn.Embedding(VOCAB_SIZE+1, CONTEXT_LEN, padding_idx=0)
         self.context_lstm = torch.nn.LSTM(input_size=CONTEXT_LEN, hidden_size=WORD_LEN, num_layers=2, batch_first=True, bidirectional=False)
         self.main_lstm = torch.nn.LSTM(input_size=WORD_LEN, hidden_size=WORD_LEN, num_layers=6, batch_first=True, bidirectional=False)
         self.dropout = torch.nn.Dropout(self.dropout)
+        self.out_proj = torch.nn.Linear(WORD_LEN, VOCAB_SIZE+1)
     
     def forward(self, x):
         src_word, context_window = x
 
-        logits = self.main_lstm(
+        _, (context_out, _) = self.context_lstm(self.embedding_context(context_window))
+        w_emb = self.embedding(src_word)
+
+        logits, _ = self.main_lstm(
             self.dropout(
-                self.embedding(src_word) + self.context_lstm(self.embedding_context(context_window))
+                w_emb + context_out[-1].unsqueeze(1).expand(-1, w_emb.size(1), -1)
             )
         )
 
-        return logits
+        return self.out_proj(logits)
     
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = DataLoader(self.dataset, batch_size=32, shuffle=True, collate_fn=self.dataset.collate_fn)
+        self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn, 
+            num_workers=self.no_workers, pin_memory=True, prefetch_factor=4)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        loss_func = torch.nn.CrossEntropyLoss()
+        loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
+        self.load_weights()
         start = time.time()
 
         for epoch in range(100):
@@ -137,27 +157,56 @@ class SpellingModel(Module):
             for n,batch in enumerate(self.dataloader):
 
                 src_word, src_context, target = batch
-                src_word.to(DEVICE)
-                src_context.to(DEVICE)
-                target.to(DEVICE)
+                src_word = src_word.to(DEVICE, non_blocking=True)
+                src_context = src_context.to(DEVICE, non_blocking=True)
+                target = target.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
                 logits = self.forward((src_word, src_context))
-                loss = loss_func(logits, target)
+                B, T, V = logits.shape
+
+                loss = loss_func(logits.view(B*T, V), target.view(B*T))
                 loss.backward()
                 self.optimizer.step()
                 total_loss += loss.item()
 
                 if time.time() - start > 10:
-                    print(f'[+] Batch {n+1} of {len(self.dataloader)}, loss: {loss.item()}')
+                    print(f'[+] Batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
                     start = time.time()
 
             avg_loss = total_loss / len(self.dataloader)
-            print(f'Epoch {epoch+1}, Loss: {avg_loss}')
+            print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
+
+            if avg_loss <= TARGET_LOSS:
+                print('[+] Finished training')
+                return
+    
+    def save_weights(self):
+        fname = f'weights_{datetime.datetime.now().strftime('%d-%b-%Y_%H-%M')}.pt'
+        torch.save({
+            'weights': self.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }, os.path.join(WEIGHTS_PATH, fname))
+    
+    def load_weights(self):
+        files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
+        if files:
+            max_file = max(files, key=os.path.getctime)
+            weights_data = torch.load(max_file, map_location=DEVICE)
+            if 'weights' in weights_data:
+                self.load_state_dict(weights_data['weights'])
+                print(f'[+] Loaded weights from {max_file}')
+
+            if self.optimizer and 'optimizer' in weights_data:
+                self.optimizer.load_state_dict(weights_data['optimizer'])
+                print(f'[+] Loaded optimizer state from {max_file}')
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
-        model = SpellingModel()
-        model.train_model()
+        try:
+            model = SpellingModel().to(DEVICE)
+            model.train_model()
+        except KeyboardInterrupt:
+            model.save_weights()
     else:
-        model = SpellingModel()
+        model = SpellingModel().to(DEVICE)
