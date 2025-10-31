@@ -89,7 +89,7 @@ class WikiDataset(Dataset):
                 return src
             
         return src
-
+    
     def read_data(self):
         with open('datasets/wiki_dump_1.txt', 'r', encoding='utf-8') as file:
             file_content = '\n'
@@ -120,7 +120,6 @@ class SpellingModel(Module):
         Module.train(self, True)
         self.dataset = WikiDataset()
         self.dropout = 0.1
-        self.no_workers = os.cpu_count()//2
 
         self.embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
         self.embedding_context = torch.nn.Embedding(VOCAB_SIZE+1, CONTEXT_LEN, padding_idx=0)
@@ -146,11 +145,12 @@ class SpellingModel(Module):
     def train_model(self):
         self.dataset.read_data()
         self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn, 
-            num_workers=self.no_workers, pin_memory=True, prefetch_factor=4)
+            num_workers=os.cpu_count()-1, pin_memory=True, prefetch_factor=8, persistent_workers=True, drop_last=True)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
         loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
         self.load_weights()
         start = time.time()
+        save_start = time.time()
 
         for epoch in range(100):
             total_loss = 0.0
@@ -173,6 +173,11 @@ class SpellingModel(Module):
                 if time.time() - start > 10:
                     print(f'[+] Batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
                     start = time.time()
+
+                    if time.time() - save_start > 600:
+                        self.save_weights()
+                        save_start = time.time()
+                        print('[+] Saved weights')
 
             avg_loss = total_loss / len(self.dataloader)
             print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
