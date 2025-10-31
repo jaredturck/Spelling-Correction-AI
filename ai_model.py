@@ -144,8 +144,7 @@ class SpellingModel(Module):
     
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn, 
-            num_workers=os.cpu_count()-1, pin_memory=True, prefetch_factor=8, persistent_workers=True, drop_last=True)
+        self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
         loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
         self.load_weights()
