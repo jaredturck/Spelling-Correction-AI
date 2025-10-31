@@ -10,13 +10,14 @@ charset['<UNK>'] = UNK_ID
 
 WEIGHTS_PATH = 'weights/'
 
-MAX_SAMPLES = 1_000_000
+MAX_SAMPLES = 5000
 CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
 DEVICE = 'cuda'
-BATCH_SIZE = 8192
+BATCH_SIZE = 500
 TARGET_LOSS = 0.1
+DROPOUT = 0
 
 class WikiDataset(Dataset):
     def __init__(self):
@@ -119,7 +120,7 @@ class SpellingModel(Module):
         super().__init__()
         Module.train(self, True)
         self.dataset = WikiDataset()
-        self.dropout = 0.1
+        self.dropout = DROPOUT
         self.optimizer = None
 
         self.embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
@@ -152,7 +153,7 @@ class SpellingModel(Module):
         start = time.time()
         save_start = time.time()
 
-        for epoch in range(100):
+        for epoch in range(10000):
             total_loss = 0.0
             for n,batch in enumerate(self.dataloader):
 
@@ -180,7 +181,7 @@ class SpellingModel(Module):
                         print('[+] Saved weights')
 
             avg_loss = total_loss / len(self.dataloader)
-            print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
+            print(f'[+] Epoch {epoch+1}, Loss: {avg_loss:.4f}')
 
             if avg_loss <= TARGET_LOSS:
                 print('[+] Finished training')
