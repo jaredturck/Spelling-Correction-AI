@@ -15,7 +15,7 @@ CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
 DEVICE = 'cuda'
-BATCH_SIZE = 16384
+BATCH_SIZE = 8192
 TARGET_LOSS = 0.1
 
 class WikiDataset(Dataset):
@@ -120,6 +120,7 @@ class SpellingModel(Module):
         Module.train(self, True)
         self.dataset = WikiDataset()
         self.dropout = 0.1
+        self.optimizer = None
 
         self.embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
         self.embedding_context = torch.nn.Embedding(VOCAB_SIZE+1, CONTEXT_LEN, padding_idx=0)
@@ -204,6 +205,18 @@ class SpellingModel(Module):
             if self.optimizer and 'optimizer' in weights_data:
                 self.optimizer.load_state_dict(weights_data['optimizer'])
                 print(f'[+] Loaded optimizer state from {max_file}')
+    
+    def predict(self, src):
+        self.eval()
+        with torch.no_grad():
+            src_word = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
+            context_window = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
+            logits = self.forward((src_word, context_window))
+            predicted_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
+            predicted_chars = [list(charset.keys())[list(charset.values()).index(i)] if i in charset.values() else '' for i in predicted_ids]
+        
+        txt = ''.join(predicted_chars).strip()
+        print(txt)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
@@ -214,3 +227,7 @@ if __name__ == "__main__":
             model.save_weights()
     else:
         model = SpellingModel().to(DEVICE)
+        model.load_weights()
+        while True:
+            txt = input('> ')
+            model.predict(txt)
