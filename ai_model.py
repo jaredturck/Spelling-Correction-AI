@@ -104,9 +104,14 @@ class DictionaryDataset(Dataset):
                     for _ in range(self.aug_count):
                         src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
                         src_word = torch.tensor(src_list, dtype=torch.long)
+                        if len(src_list) == 0:
+                            print('Empty line')
+                            continue
+
                         self.x[counter, :src_word.size(0)] = src_word
                         self.y[counter] = word_id
                         counter += 1
+                        
                     
                     if time.time() - start > 10:
                         start = time.time()
