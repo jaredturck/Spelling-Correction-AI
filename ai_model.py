@@ -12,11 +12,11 @@ charset['<UNK>'] = UNK_ID
 WEIGHTS_PATH = 'weights/'
 DATASETS_PATH = 'datasets/'
 
-MAX_SAMPLES = 1_000_000
+MAX_SAMPLES = 50_000_000
 CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
-OUTPUT_EMB_SIZE = 370_105
+OUTPUT_EMB_SIZE = 370_106
 DEVICE = 'cuda'
 BATCH_SIZE = 256
 TARGET_LOSS = 0.1
@@ -105,15 +105,18 @@ class DictionaryDataset(Dataset):
                         src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
                         src_word = torch.tensor(src_list, dtype=torch.long)
                         self.x[counter, :src_word.size(0)] = src_word
-                        self.y[counter] = word_id + 1
+                        self.y[counter] = word_id
                         counter += 1
                     
                     if time.time() - start > 10:
                         start = time.time()
-                        print(f'[+] Processed {self.x.size(0):,} samples')
+                        print(f'[+] Processed {counter:,} samples')
             
-            print(f'[+] Loaded {self.x.size(0):,} samples')
-            torch.save({'x' : self.x, 'y' : self.y}, os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'))
+            print(f'[+] Loaded {counter:,} samples')
+            torch.save(
+                {'x' : self.x, 'y' : self.y}, 
+                os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}_{counter}_.pt')
+            )
 
 class SpellingModel(Module):
     def __init__(self):
@@ -125,20 +128,19 @@ class SpellingModel(Module):
         self.d_model = 256
 
         self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, self.d_model, padding_idx=0)
-        self.tgt_embedding = torch.nn.Embedding(OUTPUT_EMB_SIZE+1, WORD_LEN+1, padding_idx=0)
 
-        self.main_lstm = torch.nn.LSTM(input_size=self.d_model, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
-        self.out_proj = torch.nn.Linear(VOCAB_SIZE+1, OUTPUT_EMB_SIZE+1)
+        self.main_lstm = torch.nn.LSTM(input_size=self.d_model, hidden_size=self.d_model, num_layers=8, batch_first=True, bidirectional=False)
+        self.out_proj = torch.nn.Linear(self.d_model, OUTPUT_EMB_SIZE)
         self.dropout = torch.nn.Dropout(self.dropout)
     
     def forward(self, x):
 
-        logits, _ = self.main_lstm(
+        logits, (c_h, _) = self.main_lstm(
             self.dropout(
                 self.src_embedding(x)
             )
         )
-        return self.out_proj(logits[:, -1, :])
+        return self.out_proj(c_h[-1])
     
     def train_model(self):
         self.dataset.read_data()
@@ -207,13 +209,9 @@ class SpellingModel(Module):
         self.eval()
         with torch.no_grad():
             src_word = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
-            context_window = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
-            logits = self.forward((src_word, context_window))
-            predicted_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
-            predicted_chars = [list(charset.keys())[list(charset.values()).index(i)] if i in charset.values() else '' for i in predicted_ids]
-        
-        txt = ''.join(predicted_chars).strip()
-        print(txt)
+            logits = self.forward(src_word)
+            predicted_id = torch.argmax(logits, dim=-1)
+            print([predicted_id])
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
