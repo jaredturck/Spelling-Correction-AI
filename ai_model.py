@@ -2,9 +2,10 @@ import torch, random, time, sys, os, datetime
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
-from unidecode import unidecode
+from torch.nn import functional as F
+import string
 
-charset = {chr(i) : n+1 for n,i in enumerate(range(32, 127))}
+charset = {chr(i) : n+1 for n,i in enumerate(string.ascii_lowercase)}
 UNK_ID = len(charset) + 1
 charset['<UNK>'] = UNK_ID
 
@@ -14,15 +15,16 @@ MAX_SAMPLES = 5000
 CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
+OUTPUT_EMB_SIZE = 370_105
 DEVICE = 'cuda'
 BATCH_SIZE = 500
 TARGET_LOSS = 0.1
 DROPOUT = 0
 
-class WikiDataset(Dataset):
+class DictionaryDataset(Dataset):
     def __init__(self):
         self.training_data = []
-        self.buffer_size = 1024 * 1024 * 16  # 16 MB buffer size
+        self.operations = [1,1,1,0,0,0]
     
     def __len__(self):
         return len(self.training_data)
@@ -31,19 +33,8 @@ class WikiDataset(Dataset):
         return self.training_data[idx]
     
     def collate_fn(self, batch):
-        x_word, x_context, y = zip(*batch)
-        x_word = pad_sequence(x_word, batch_first=True, padding_value=0)
-        x_context = pad_sequence(x_context, batch_first=True, padding_value=0)
-        y = pad_sequence(y, batch_first=True, padding_value=0)
-
-        T = x_word.size(1)
-        if y.size(1) < T:
-            pad = torch.zeros(y.size(0), T - y.size(1))
-            y = torch.cat([y, pad], dim=1)
-        elif y.size(1) > T:
-            y = y[:, :T]
-
-        return x_word.long(), x_context.long(), y.long()
+        x, y = zip(*batch)
+        return x,y
     
     def augment_text(self, text):
         
@@ -53,33 +44,33 @@ class WikiDataset(Dataset):
 
         while src == tgt:
             tgt = list(text)
-            swaps = random.randint(0, len(src) // 3) # ab --> ba
-            replaces = random.randint(0, len(src) // 3) # a --> b
-            deletes = random.randint(0, len(src) // 3) # ab --> a
-            inserts = random.randint(0, len(src) // 3) # ab --> acb
-            operations = [random.randint(0,1) for i in range(4)] # which operations to apply
+            swaps = random.randint(0, len(src) // 2) # ab --> ba
+            replaces = random.randint(0, len(src) // 2) # a --> b
+            deletes = random.randint(0, len(src) // 2) # ab --> a
+            inserts = random.randint(0, len(src) // 2) # ab --> acb
+            random.shuffle(self.operations)
 
             # swaps
-            if operations[0]:
+            if self.operations[0]:
                 for i in range(swaps):
                     pos = random.randint(0, len(src)-2)
                     src[pos], src[pos+1] = src[pos+1], src[pos]
             
             # replaces
-            if operations[1]:
+            if self.operations[1]:
                 for i in range(replaces):
                     pos = random.randint(0, len(src)-1)
                     new_char = random.choice(list(charset.keys()))
                     src[pos] = new_char
 
             # deletes
-            if operations[2]:
+            if self.operations[2]:
                 for i in range(deletes):
                     pos = random.randint(0, len(src)-1)
                     src.pop(pos)
             
             # inserts
-            if operations[3]:
+            if self.operations[3]:
                 for i in range(inserts):
                     pos = random.randint(0, len(src))
                     new_char = random.choice(list(charset.keys()))
@@ -92,56 +83,43 @@ class WikiDataset(Dataset):
         return src
     
     def read_data(self):
-        with open('datasets/wiki_dump_1.txt', 'r', encoding='utf-8') as file:
-            file_content = '\n'
-            start = time.time()
-            while file_content:
-                file_content = unidecode(file.read(self.buffer_size))
-                words = file_content.split(' ')
-                seek = 0
+        start = time.time()
+        with open('datasets/words_alpha.txt', 'r', encoding='utf-8') as file:
+            for word_id,row in enumerate(file):
+                row = row.rstrip('\n')
+                for _ in range(100):
+                    src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
+                    src_word = torch.tensor(src_list, dtype=torch.long)
+                    src_tensor = torch.zeros(WORD_LEN, dtype=torch.long)
+                    src_tensor[:src_word.size(0)] = src_word
+                    self.training_data.append((src_tensor, torch.tensor(word_id+1, dtype=torch.long)))
                 
-                for word in words:
-                    seek += len(word) + 1
-                    context_window = [charset.get(i,UNK_ID) for i in file_content[max(seek-CONTEXT_LEN//2,0) : min(seek+CONTEXT_LEN//2, len(file_content))]]
-                    src_word = [charset.get(i,UNK_ID) for i in self.augment_text(word)][:WORD_LEN]
-                    tgt_word = [charset.get(i,UNK_ID) for i in word][:WORD_LEN]
-                    self.training_data.append((torch.tensor(src_word), torch.tensor(context_window), torch.tensor(tgt_word)))
-
-                    if time.time() - start > 10:
-                        print(f'[+] Processed {len(self.training_data):,} samples')
-                        start = time.time()
-                    
-                    if len(self.training_data) >= MAX_SAMPLES:
-                        print(f'[+] Finished processing {len(self.training_data):,} samples')
-                        return
+                if time.time() - start > 10:
+                    start = time.time()
+                    print(f'[+] Processed {len(self.training_data):,} samples')
 
 class SpellingModel(Module):
     def __init__(self):
         super().__init__()
         Module.train(self, True)
-        self.dataset = WikiDataset()
+        self.dataset = DictionaryDataset()
         self.dropout = DROPOUT
         self.optimizer = None
 
-        self.embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
-        self.embedding_context = torch.nn.Embedding(VOCAB_SIZE+1, CONTEXT_LEN, padding_idx=0)
-        self.context_lstm = torch.nn.LSTM(input_size=CONTEXT_LEN, hidden_size=WORD_LEN, num_layers=2, batch_first=True, bidirectional=False)
-        self.main_lstm = torch.nn.LSTM(input_size=WORD_LEN, hidden_size=WORD_LEN, num_layers=6, batch_first=True, bidirectional=False)
+        self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
+        self.tgt_embedding = torch.nn.Embedding(OUTPUT_EMB_SIZE+1, WORD_LEN, padding_idx=0)
+
+        self.main_lstm = torch.nn.LSTM(input_size=VOCAB_SIZE+1, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
+        self.out_proj = torch.nn.Linear(VOCAB_SIZE+1, OUTPUT_EMB_SIZE+1)
         self.dropout = torch.nn.Dropout(self.dropout)
-        self.out_proj = torch.nn.Linear(WORD_LEN, VOCAB_SIZE+1)
     
     def forward(self, x):
-        src_word, context_window = x
-
-        _, (context_out, _) = self.context_lstm(self.embedding_context(context_window))
-        w_emb = self.embedding(src_word)
 
         logits, _ = self.main_lstm(
             self.dropout(
-                w_emb + context_out[-1].unsqueeze(1).expand(-1, w_emb.size(1), -1)
+                self.src_embedding(x)
             )
         )
-
         return self.out_proj(logits)
     
     def train_model(self):
@@ -157,13 +135,12 @@ class SpellingModel(Module):
             total_loss = 0.0
             for n,batch in enumerate(self.dataloader):
 
-                src_word, src_context, target = batch
+                src_word, target = batch
                 src_word = src_word.to(DEVICE, non_blocking=True)
-                src_context = src_context.to(DEVICE, non_blocking=True)
                 target = target.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
-                logits = self.forward((src_word, src_context))
+                logits = self.forward(src_word)
                 B, T, V = logits.shape
 
                 loss = loss_func(logits.view(B*T, V), target.view(B*T))
