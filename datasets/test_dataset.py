@@ -27,6 +27,7 @@ class DictionaryDataset():
         for l in string.ascii_lowercase:
             (x1, y1), (x2, y2) = self.distance[letter], self.distance[l]
             prob = math.hypot(x1 - x2, y1 - y2)
+            prob = max(math.exp(-1.2 * prob), 1e-3)
             weights.append(prob)
             letters.append(l)
         
@@ -36,45 +37,28 @@ class DictionaryDataset():
         
         src = list(text)
         tgt = list(text)
-        counter = 0
 
-        while src == tgt:
-            tgt = list(text)
-            swaps = random.randint(0, len(src) // 2) # ab --> ba
-            replaces = random.randint(0, len(src) // 2) # a --> b
-            deletes = random.randint(0, len(src) // 2) # ab --> a
-            inserts = random.randint(0, len(src) // 2) # ab --> acb
-            random.shuffle(self.operations)
+        self.operations = [random.choice([1,2,3,4]) for i in range(random.randint(1, math.ceil(len(src) / 2)))]
+        self.operations = self.operations + [0 for i in range(len(src) - len(self.operations))]
+        random.shuffle(self.operations)
 
-            # swaps
-            if self.operations[0]:
-                for i in range(swaps):
-                    pos = random.randint(0, len(src)-2)
+        for pos in range(len(src)):
+            if pos + 1 >= len(src):
+                break
+
+            match self.operations[pos]:
+                case 1:
                     src[pos], src[pos+1] = src[pos+1], src[pos]
-            
-            # replaces
-            if self.operations[1]:
-                for i in range(replaces):
-                    pos = random.randint(0, len(src)-1)
-                    new_char = self.get_letter(src[pos])
-                    src[pos] = new_char
-
-            # deletes
-            if self.operations[2]:
-                for i in range(deletes):
-                    pos = random.randint(0, len(src)-1)
+                case 2:
+                    src[pos] = self.get_letter(src[pos])
+                case 3:
                     src.pop(pos)
-            
-            # inserts
-            if self.operations[3]:
-                for i in range(inserts):
-                    pos = random.randint(0, len(src)-1)
-                    new_char = self.get_letter(src[pos])
-                    src.insert(pos, new_char)
-
-            counter += 1
-            if counter >= 10:
-                return src
+                case 4:
+                    src.insert(pos, self.get_letter(src[pos]))
+        
+        if src == tgt:
+            pos = random.choice(list(range(len(src))))
+            src[pos] = self.get_letter(src[pos])
             
         return src
     
