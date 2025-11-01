@@ -5,19 +5,20 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.nn import functional as F
 import string
 
-charset = {chr(i) : n+1 for n,i in enumerate(string.ascii_lowercase)}
+charset = {i : n+1 for n,i in enumerate(string.ascii_lowercase)}
 UNK_ID = len(charset) + 1
 charset['<UNK>'] = UNK_ID
 
 WEIGHTS_PATH = 'weights/'
+DATASETS_PATH = 'datasets/'
 
-MAX_SAMPLES = 5000
+MAX_SAMPLES = 1_000_000
 CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
 OUTPUT_EMB_SIZE = 370_105
 DEVICE = 'cuda'
-BATCH_SIZE = 500
+BATCH_SIZE = 1024
 TARGET_LOSS = 0.1
 DROPOUT = 0
 
@@ -31,10 +32,6 @@ class DictionaryDataset(Dataset):
     
     def __getitem__(self, idx):
         return self.training_data[idx]
-    
-    def collate_fn(self, batch):
-        x, y = zip(*batch)
-        return x,y
     
     def augment_text(self, text):
         
@@ -83,20 +80,36 @@ class DictionaryDataset(Dataset):
         return src
     
     def read_data(self):
-        start = time.time()
-        with open('datasets/words_alpha.txt', 'r', encoding='utf-8') as file:
-            for word_id,row in enumerate(file):
-                row = row.rstrip('\n')
-                for _ in range(100):
-                    src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
-                    src_word = torch.tensor(src_list, dtype=torch.long)
-                    src_tensor = torch.zeros(WORD_LEN, dtype=torch.long)
-                    src_tensor[:src_word.size(0)] = src_word
-                    self.training_data.append((src_tensor, torch.tensor(word_id+1, dtype=torch.long)))
-                
-                if time.time() - start > 10:
-                    start = time.time()
-                    print(f'[+] Processed {len(self.training_data):,} samples')
+
+        # dataset_files = [os.path.join(DATASETS_PATH, file) for file in os.listdir(DATASETS_PATH) if file.endswith('.pt')]
+        dataset_files = []
+        max_file = max(dataset_files, key=os.path.getctime) if dataset_files else None
+
+        if max_file:
+            self.training_data = torch.load(max_file)
+            print(f'[+] Loaded {len(self.training_data):,} samples')
+
+        else:
+            start = time.time()
+            with open(os.path.join(DATASETS_PATH, 'words_alpha.txt'), 'r', encoding='utf-8') as file:
+                for word_id,row in enumerate(file):
+                    row = row.rstrip('\n')
+                    for _ in range(100):
+                        src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
+                        src_word = torch.tensor(src_list, dtype=torch.long)
+                        src_tensor = torch.zeros(WORD_LEN, dtype=torch.long)
+                        src_tensor[:src_word.size(0)] = src_word
+                        self.training_data.append((src_tensor, word_id+1))
+                    
+                    if time.time() - start > 10:
+                        start = time.time()
+                        print(f'[+] Processed {len(self.training_data):,} samples')
+                    
+                    if len(self.training_data) >= MAX_SAMPLES:
+                        break
+            
+            print(f'[+] Loaded {len(self.training_data):,} samples')
+            torch.save(self.training_data, os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'))
 
 class SpellingModel(Module):
     def __init__(self):
@@ -107,9 +120,9 @@ class SpellingModel(Module):
         self.optimizer = None
 
         self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
-        self.tgt_embedding = torch.nn.Embedding(OUTPUT_EMB_SIZE+1, WORD_LEN, padding_idx=0)
+        self.tgt_embedding = torch.nn.Embedding(OUTPUT_EMB_SIZE+1, WORD_LEN+1, padding_idx=0)
 
-        self.main_lstm = torch.nn.LSTM(input_size=VOCAB_SIZE+1, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
+        self.main_lstm = torch.nn.LSTM(input_size=WORD_LEN, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
         self.out_proj = torch.nn.Linear(VOCAB_SIZE+1, OUTPUT_EMB_SIZE+1)
         self.dropout = torch.nn.Dropout(self.dropout)
     
@@ -120,30 +133,30 @@ class SpellingModel(Module):
                 self.src_embedding(x)
             )
         )
-        return self.out_proj(logits)
+        return self.out_proj(logits[:, -1, :])
     
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
+        self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
+        loss_func = torch.nn.CrossEntropyLoss()
         self.load_weights()
+        self.train()
         start = time.time()
         save_start = time.time()
 
+        print('[+] Starting training')
         for epoch in range(10000):
             total_loss = 0.0
-            for n,batch in enumerate(self.dataloader):
+            for n,(src,tgt) in enumerate(self.dataloader):
 
-                src_word, target = batch
-                src_word = src_word.to(DEVICE, non_blocking=True)
-                target = target.to(DEVICE, non_blocking=True)
+                src = src.to(DEVICE, non_blocking=True)
+                tgt = tgt.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
-                logits = self.forward(src_word)
-                B, T, V = logits.shape
+                logits = self.forward(src)
 
-                loss = loss_func(logits.view(B*T, V), target.view(B*T))
+                loss = loss_func(logits, tgt)
                 loss.backward()
                 self.optimizer.step()
                 total_loss += loss.item()
