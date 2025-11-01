@@ -1,2 +1,2 @@
-datasets/
-weights/
+*.pt
+*.txt
