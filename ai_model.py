@@ -16,7 +16,7 @@ MAX_SAMPLES = 50_000_000
 CONTEXT_LEN = 64
 WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
-OUTPUT_EMB_SIZE = 370_106
+OUTPUT_EMB_SIZE = 370_107
 DEVICE = 'cuda'
 BATCH_SIZE = 256
 TARGET_LOSS = 0.1
@@ -130,23 +130,32 @@ class SpellingModel(Module):
         self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, self.d_model, padding_idx=0)
 
         self.main_lstm = torch.nn.LSTM(input_size=self.d_model, hidden_size=self.d_model, num_layers=8, batch_first=True, bidirectional=False)
-        self.out_proj = torch.nn.Linear(self.d_model, OUTPUT_EMB_SIZE)
+        self.out_proj = torch.nn.Linear(self.d_model, 1)
         self.dropout = torch.nn.Dropout(self.dropout)
+
+        self.adaptive_softmax = torch.nn.AdaptiveLogSoftmaxWithLoss(
+            in_features=self.d_model, 
+            n_classes=OUTPUT_EMB_SIZE, 
+            cutoffs=[50_000, 200_000], 
+            div_value=4.0
+        )
     
     def forward(self, x):
-
-        logits, (c_h, _) = self.main_lstm(
+        logits, (h_n, _) = self.main_lstm(
             self.dropout(
                 self.src_embedding(x)
             )
         )
-        return self.out_proj(c_h[-1])
+        mask = (x != 0)
+        scores = self.out_proj(logits).squeeze(-1).masked_fill(~mask, float('-inf'))
+        weights = torch.softmax(scores, dim=-1)
+        features = torch.bmm(weights.unsqueeze(1), logits).squeeze(1)
+        return features
     
     def train_model(self):
         self.dataset.read_data()
         self.dataloader = DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        loss_func = torch.nn.CrossEntropyLoss()
         self.load_weights()
         self.train()
         start = time.time()
@@ -160,10 +169,11 @@ class SpellingModel(Module):
                 src = src.to(DEVICE, non_blocking=True)
                 tgt = tgt.to(DEVICE, non_blocking=True)
 
-                self.optimizer.zero_grad()
-                logits = self.forward(src)
+                self.optimizer.zero_grad() 
+                feat = self.forward(src) 
+                out = self.adaptive_softmax(feat, tgt)
 
-                loss = loss_func(logits, tgt)
+                loss = out.loss
                 loss.backward()
                 self.optimizer.step()
                 total_loss += loss.item()
