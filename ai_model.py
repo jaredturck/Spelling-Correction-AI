@@ -1,4 +1,4 @@
-import torch, random, time, sys, os, datetime
+import torch, random, time, sys, os, datetime, platform
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -18,9 +18,13 @@ WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
 OUTPUT_EMB_SIZE = 370_107
 DEVICE = 'cuda'
-BATCH_SIZE = 256
 TARGET_LOSS = 0.1
 DROPOUT = 0
+
+if platform.uname().node == 'Jared-PC':
+    BATCH_SIZE = 256
+else:
+    BATCH_SIZE = 3200
 
 class DictionaryDataset(Dataset):
     def __init__(self):
