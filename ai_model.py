@@ -1,4 +1,4 @@
-import torch, random, time, sys, os, datetime, platform
+import torch, random, time, sys, os, datetime, platform, math
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -30,6 +30,15 @@ class DictionaryDataset(Dataset):
     def __init__(self):
         self.operations = [1,1,1,0,0,0]
         self.aug_count = 100
+
+        # Create euclidean distance lookup
+        rows = ('qwertyuiop', 'asdfghjkl', 'zxcvbnm')
+        offsets = (0, 0.5, 1)
+        self.distance = {}
+        for r,row in enumerate(rows):
+            off = offsets[r]
+            for c,ch in enumerate(row):
+                self.distance[ch] = (off + c, r)
     
     def __len__(self):
         return self.x.size(0)
@@ -37,49 +46,48 @@ class DictionaryDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
     
+    def get_letter(self, letter):
+        ''' Choose random letter weighted by euclidean distance '''
+        weights = []
+        letters = []
+        for l in string.ascii_lowercase:
+            (x1, y1), (x2, y2) = self.distance[letter], self.distance[l]
+            prob = math.hypot(x1 - x2, y1 - y2)
+            prob = max(math.exp(-1.2 * prob), 1e-3)
+            weights.append(prob)
+            letters.append(l)
+        
+        return random.choices(letters, weights=weights, k=1)[0]
+    
     def augment_text(self, text):
+
+        if len(text) <= 1:
+            return text
         
         src = list(text)
         tgt = list(text)
-        counter = 0
 
-        while src == tgt:
-            tgt = list(text)
-            swaps = random.randint(0, len(src) // 2) # ab --> ba
-            replaces = random.randint(0, len(src) // 2) # a --> b
-            deletes = random.randint(0, len(src) // 2) # ab --> a
-            inserts = random.randint(0, len(src) // 2) # ab --> acb
-            random.shuffle(self.operations)
+        self.operations = [random.choices([1,2,3,4], weights=[0.10, 0.25, 0.35, 0.35])[0] for i in range(random.randint(1, math.ceil(len(src) / 2)))]
+        self.operations = self.operations + [0 for i in range(len(src) - len(self.operations))]
+        random.shuffle(self.operations)
 
-            # swaps
-            if self.operations[0]:
-                for i in range(swaps):
-                    pos = random.randint(0, len(src)-2)
+        for pos in range(len(src)):
+            if pos + 1 >= len(src):
+                break
+
+            match self.operations[pos]:
+                case 1:
                     src[pos], src[pos+1] = src[pos+1], src[pos]
-            
-            # replaces
-            if self.operations[1]:
-                for i in range(replaces):
-                    pos = random.randint(0, len(src)-1)
-                    new_char = random.choice(list(charset.keys()))
-                    src[pos] = new_char
-
-            # deletes
-            if self.operations[2]:
-                for i in range(deletes):
-                    pos = random.randint(0, len(src)-1)
+                case 2:
+                    src[pos] = self.get_letter(src[pos])
+                case 3:
                     src.pop(pos)
-            
-            # inserts
-            if self.operations[3]:
-                for i in range(inserts):
-                    pos = random.randint(0, len(src))
-                    new_char = random.choice(list(charset.keys()))
-                    src.insert(pos, new_char)
-
-            counter += 1
-            if counter >= 10:
-                return src
+                case 4:
+                    src.insert(pos, self.get_letter(src[pos]))
+        
+        if src == tgt:
+            pos = random.choice(list(range(len(src))))
+            src[pos] = self.get_letter(src[pos])
             
         return src
     

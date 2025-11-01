@@ -11,7 +11,7 @@ class DictionaryDataset():
         self.operations = [1,1,1,0,0,0]
         self.aug_count = 5
 
-        # Setup query euclidean distance lookup
+        # Create euclidean distance lookup
         rows = ('qwertyuiop', 'asdfghjkl', 'zxcvbnm')
         offsets = (0, 0.5, 1)
         self.distance = {}
@@ -34,11 +34,14 @@ class DictionaryDataset():
         return random.choices(letters, weights=weights, k=1)[0]
 
     def augment_text(self, text):
+
+        if len(text) <= 1:
+            return text
         
         src = list(text)
         tgt = list(text)
 
-        self.operations = [random.choice([1,2,3,4]) for i in range(random.randint(1, math.ceil(len(src) / 2)))]
+        self.operations = [random.choices([1,2,3,4], weights=[0.10, 0.25, 0.35, 0.35])[0] for i in range(random.randint(1, math.ceil(len(src) / 2)))]
         self.operations = self.operations + [0 for i in range(len(src) - len(self.operations))]
         random.shuffle(self.operations)
 
