@@ -18,20 +18,20 @@ WORD_LEN = 16
 VOCAB_SIZE = max(charset.values()) + 1
 OUTPUT_EMB_SIZE = 370_105
 DEVICE = 'cuda'
-BATCH_SIZE = 1024
+BATCH_SIZE = 256
 TARGET_LOSS = 0.1
 DROPOUT = 0
 
 class DictionaryDataset(Dataset):
     def __init__(self):
-        self.training_data = []
         self.operations = [1,1,1,0,0,0]
+        self.aug_count = 100
     
     def __len__(self):
-        return len(self.training_data)
+        return self.x.size(0)
     
     def __getitem__(self, idx):
-        return self.training_data[idx]
+        return self.x[idx], self.y[idx]
     
     def augment_text(self, text):
         
@@ -81,35 +81,39 @@ class DictionaryDataset(Dataset):
     
     def read_data(self):
 
-        # dataset_files = [os.path.join(DATASETS_PATH, file) for file in os.listdir(DATASETS_PATH) if file.endswith('.pt')]
-        dataset_files = []
+        dataset_files = [os.path.join(DATASETS_PATH, file) for file in os.listdir(DATASETS_PATH) if file.endswith('.pt')]
         max_file = max(dataset_files, key=os.path.getctime) if dataset_files else None
 
         if max_file:
-            self.training_data = torch.load(max_file)
-            print(f'[+] Loaded {len(self.training_data):,} samples')
+            file = torch.load(max_file, map_location=DEVICE)
+            self.x = file['x']
+            self.y = file['y']
+            print(f'[+] Loaded {self.x.size(0):,} samples')
 
         else:
-            start = time.time()
             with open(os.path.join(DATASETS_PATH, 'words_alpha.txt'), 'r', encoding='utf-8') as file:
-                for word_id,row in enumerate(file):
-                    row = row.rstrip('\n')
-                    for _ in range(100):
+                file_content = file.read().split('\n')
+
+                no_words = min(len(file_content), MAX_SAMPLES // self.aug_count)
+                start = time.time()
+                self.x = torch.zeros((no_words * self.aug_count, WORD_LEN), dtype=torch.long)
+                self.y = torch.empty((no_words * self.aug_count,), dtype=torch.long)
+                counter = 0
+
+                for word_id,row in enumerate(file_content[:no_words]):
+                    for _ in range(self.aug_count):
                         src_list = [charset.get(i,UNK_ID) for i in self.augment_text(row)][:WORD_LEN]
                         src_word = torch.tensor(src_list, dtype=torch.long)
-                        src_tensor = torch.zeros(WORD_LEN, dtype=torch.long)
-                        src_tensor[:src_word.size(0)] = src_word
-                        self.training_data.append((src_tensor, word_id+1))
+                        self.x[counter, :src_word.size(0)] = src_word
+                        self.y[counter] = word_id + 1
+                        counter += 1
                     
                     if time.time() - start > 10:
                         start = time.time()
-                        print(f'[+] Processed {len(self.training_data):,} samples')
-                    
-                    if len(self.training_data) >= MAX_SAMPLES:
-                        break
+                        print(f'[+] Processed {self.x.size(0):,} samples')
             
-            print(f'[+] Loaded {len(self.training_data):,} samples')
-            torch.save(self.training_data, os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'))
+            print(f'[+] Loaded {self.x.size(0):,} samples')
+            torch.save({'x' : self.x, 'y' : self.y}, os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'))
 
 class SpellingModel(Module):
     def __init__(self):
@@ -118,11 +122,12 @@ class SpellingModel(Module):
         self.dataset = DictionaryDataset()
         self.dropout = DROPOUT
         self.optimizer = None
+        self.d_model = 256
 
-        self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, WORD_LEN, padding_idx=0)
+        self.src_embedding = torch.nn.Embedding(VOCAB_SIZE+1, self.d_model, padding_idx=0)
         self.tgt_embedding = torch.nn.Embedding(OUTPUT_EMB_SIZE+1, WORD_LEN+1, padding_idx=0)
 
-        self.main_lstm = torch.nn.LSTM(input_size=WORD_LEN, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
+        self.main_lstm = torch.nn.LSTM(input_size=self.d_model, hidden_size=VOCAB_SIZE+1, num_layers=8, batch_first=True, bidirectional=False)
         self.out_proj = torch.nn.Linear(VOCAB_SIZE+1, OUTPUT_EMB_SIZE+1)
         self.dropout = torch.nn.Dropout(self.dropout)
     
@@ -162,7 +167,7 @@ class SpellingModel(Module):
                 total_loss += loss.item()
 
                 if time.time() - start > 10:
-                    print(f'[+] Batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
+                    print(f'[+] Batch {n+1:,} of {len(self.dataloader):,}, loss: {loss.item():.4f}')
                     start = time.time()
 
                     if time.time() - save_start > 600:
@@ -183,6 +188,7 @@ class SpellingModel(Module):
             'weights': self.state_dict(),
             'optimizer': self.optimizer.state_dict()
         }, os.path.join(WEIGHTS_PATH, fname))
+        print(f'[+] Saved weights {fname}')
     
     def load_weights(self):
         files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
