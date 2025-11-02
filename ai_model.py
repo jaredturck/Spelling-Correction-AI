@@ -164,6 +164,13 @@ class DictionaryDataset(Dataset):
                 {'x' : self.x, 'y' : self.y}, 
                 os.path.join(DATASETS_PATH, f'tensors_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}_{counter}_.pt')
             )
+    
+    def generate_lookup(self):
+        self.word2int_lookup = {}
+        with open(os.path.join(DATASETS_PATH, 'words_alpha.txt'), 'r', encoding='utf-8') as file:
+            file_content = file.read().split('\n')
+            for word_id,row in enumerate(file_content):
+                self.word2int_lookup[word_id] = row
 
 class SpellingModel(Module):
     def __init__(self):
@@ -267,8 +274,10 @@ class SpellingModel(Module):
         with torch.no_grad():
             src_word = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
             logits = self.forward(src_word)
-            predicted_id = torch.argmax(logits, dim=-1)
-            print([predicted_id])
+            prob = self.adaptive_softmax.log_prob(logits)
+            predicted_id = int(torch.argmax(prob, dim=-1).item())
+            predicted = self.dataset.word2int_lookup[predicted_id]
+            print([predicted])
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
@@ -280,6 +289,7 @@ if __name__ == "__main__":
     else:
         model = SpellingModel().to(DEVICE)
         model.load_weights()
+        model.dataset.generate_lookup()
         while True:
             txt = input('> ')
             model.predict(txt)
