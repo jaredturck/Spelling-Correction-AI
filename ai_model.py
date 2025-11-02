@@ -86,7 +86,10 @@ class DictionaryDataset(Dataset):
             return text
         
         if random.random() < 0.25:
+            original_text = text
             text = self.phonetic_spelling(text)
+            if len(text) == 0:
+                text = original_text
         
         src = list(text)
         tgt = list(text)
