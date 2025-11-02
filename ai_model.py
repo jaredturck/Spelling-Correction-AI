@@ -168,10 +168,12 @@ class DictionaryDataset(Dataset):
     
     def generate_lookup(self):
         self.word2int_lookup = {}
+        self.int2word_lookup = {}
         with open(os.path.join(DATASETS_PATH, 'words_alpha.txt'), 'r', encoding='utf-8') as file:
             file_content = file.read().split('\n')
             for word_id,row in enumerate(file_content):
-                self.word2int_lookup[word_id] = row
+                self.word2int_lookup[row] = word_id
+                self.int2word_lookup[word_id] = row
 
 class SpellingModel(Module):
     def __init__(self):
@@ -280,16 +282,17 @@ class SpellingModel(Module):
 
             similar_words = self.bk_tree.get_similar_words(src)
 
-            word_ids = [self.dataset.word2int_lookup[i] for i in similar_words]
-
-            mask = torch.full_like(prob, float('-inf'))
-            idx = torch.tensor(word_ids, device=DEVICE)
-            mask[idx] = 0
-            prob = prob + mask
-
-            predicted_id = int(torch.argmax(prob, dim=-1).item())
-            predicted = self.dataset.word2int_lookup[predicted_id]
-            print([predicted])
+            word_ids = [self.dataset.word2int_lookup[i] for i in similar_words if i in self.dataset.word2int_lookup]
+            if word_ids:
+                mask = torch.full_like(prob, float('-inf'))
+                idx = torch.tensor(word_ids, device=DEVICE)
+                mask[idx] = 0
+                prob = prob + mask
+            
+            
+            _, ids = torch.topk(prob, k=5, dim=-1)
+            suggestions = [self.dataset.int2word_lookup[int(i.item())] for i in ids]
+            print(suggestions)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
