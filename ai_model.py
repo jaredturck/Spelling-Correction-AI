@@ -292,7 +292,7 @@ class SpellingModel(Module):
             
             _, ids = torch.topk(prob, k=5, dim=-1)
             suggestions = [self.dataset.int2word_lookup[int(i.item())] for i in ids]
-            print(suggestions)
+            return suggestions
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
