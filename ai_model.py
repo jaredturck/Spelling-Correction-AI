@@ -1,6 +1,7 @@
 import torch, random, time, sys, os, datetime, platform, math, re
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
+from bk_tree import BKTree
 import string
 
 charset = {i : n+1 for n,i in enumerate(string.ascii_lowercase)}
@@ -177,6 +178,7 @@ class SpellingModel(Module):
         super().__init__()
         Module.train(self, True)
         self.dataset = DictionaryDataset()
+        self.bk_tree = BKTree()
         self.dropout = DROPOUT
         self.optimizer = None
         self.d_model = 256
@@ -274,7 +276,17 @@ class SpellingModel(Module):
         with torch.no_grad():
             src_word = torch.tensor([[charset.get(i, UNK_ID) for i in src]]).to(DEVICE)
             logits = self.forward(src_word)
-            prob = self.adaptive_softmax.log_prob(logits)
+            prob = self.adaptive_softmax.log_prob(logits).squeeze(0)
+
+            similar_words = self.bk_tree.get_similar_words(src)
+
+            word_ids = [self.dataset.word2int_lookup[i] for i in similar_words]
+
+            mask = torch.full_like(prob, float('-inf'))
+            idx = torch.tensor(word_ids, device=DEVICE)
+            mask[idx] = 0
+            prob = prob + mask
+
             predicted_id = int(torch.argmax(prob, dim=-1).item())
             predicted = self.dataset.word2int_lookup[predicted_id]
             print([predicted])
