@@ -1,8 +1,6 @@
-import torch, random, time, sys, os, datetime, platform, math
+import torch, random, time, sys, os, datetime, platform, math, re
 from torch.nn import Module
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
-from torch.nn import functional as F
 import string
 
 charset = {i : n+1 for n,i in enumerate(string.ascii_lowercase)}
@@ -22,7 +20,7 @@ TARGET_LOSS = 0.1
 DROPOUT = 0
 
 if platform.uname().node == 'Jared-PC':
-    BATCH_SIZE = 256
+    BATCH_SIZE = 512
 else:
     BATCH_SIZE = 3200
 
@@ -39,12 +37,35 @@ class DictionaryDataset(Dataset):
             off = offsets[r]
             for c,ch in enumerate(row):
                 self.distance[ch] = (off + c, r)
+        
+        self.phonetic_rules = [
+            (r"tion", [("shun", 0.7), ("chun", 0.2), ("shon", 0.1)]),
+            (r"ph",   [("f", 1.0)]),
+            (r"ough", [("off", 0.4), ("aw", 0.25), ("oh", 0.2), ("uff", 0.15)]),
+            (r"\bkn", [("n", 1.0)]),
+            (r"\bwr", [("r", 1.0)]),
+            (r"ee",   [("ea", 0.5), ("i", 0.3), ("e", 0.2)]),
+            (r"oo",   [("u", 0.5), ("ou", 0.3), ("ew", 0.2)]),
+            (r"c(?=[eiy])", [("s", 0.8), ("c", 0.2)]),
+            (r"c",    [("k", 0.7), ("q", 0.1), ("c", 0.2)]),
+            (r"x",    [("ks", 0.8), ("gz", 0.2)])
+        ]
     
     def __len__(self):
         return self.x.size(0)
     
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
+    
+    def phonetic_spelling(self, text):
+        for p, alts in self.phonetic_rules:
+            if random.random() < 0.25:
+                choices, w = zip(*alts)
+                text = re.sub(p, lambda _: random.choices(choices, weights=w, k=1)[0], text)
+
+        text = re.sub(r'([a-z])\1', r'\1', text) # Replaces double letters with single
+        text = re.sub(r'e\b', '', text) # Removes silent e at end of words
+        return text
     
     def get_letter(self, letter):
         ''' Choose random letter weighted by euclidean distance '''
@@ -64,12 +85,18 @@ class DictionaryDataset(Dataset):
         if len(text) <= 1:
             return text
         
+        if random.random() < 0.25:
+            text = self.phonetic_spelling(text)
+        
         src = list(text)
         tgt = list(text)
 
         self.operations = [random.choices([1,2,3,4], weights=[0.10, 0.25, 0.35, 0.35])[0] for i in range(random.randint(1, math.ceil(len(src) / 2)))]
         self.operations = self.operations + [0 for i in range(len(src) - len(self.operations))]
         random.shuffle(self.operations)
+
+        if self.operations[0] != 0:
+            random.shuffle(self.operations)
 
         for pos in range(len(src)):
             if pos + 1 >= len(src):
