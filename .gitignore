@@ -3,3 +3,6 @@ datasets/sample_data.txt
 datasets/*.pt
 weights/*
 !/weights/weights_02-Nov-2025_03-32.pt
+
+*.txt
+*.csv
