@@ -1,10 +1,9 @@
 import csv
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import transformers, torch
 from tqdm import tqdm
 
-batch_size = 64
-samples_per_word = 3
 
 class SentenceGenerator:
     def __init__(self, batch_size, samples_per_word):
@@ -21,28 +20,36 @@ class SentenceGenerator:
             for device in range(2)
         ]
 
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self.system_prompt = 'Return one sentence containing the word: '
+        for pipe in self.pipes:
+            pipe.generation_config.max_length = None
+            pipe.generation_config.max_new_tokens = 32
+            pipe.generation_config.do_sample = True
+            pipe.generation_config.temperature = 0.9
+            pipe.generation_config.top_p = 0.95
+            pipe.tokenizer.clean_up_tokenization_spaces = False
+
+        self.executors = [
+            ThreadPoolExecutor(max_workers=1)
+            for _ in range(2)
+        ]
+
+        self.system_prompt = 'Return one sentence containing the word, sentence should be no more than 10 words: '
 
     def generate_batch(self, pipe, words):
         sample_words = words * self.samples_per_word
 
-        messages = [
+        messages = (
             [
                 {'role': 'system', 'content': self.system_prompt},
                 {'role': 'user', 'content': word}
             ]
             for word in sample_words
-        ]
+        )
 
-        outputs = pipe(
+        outputs = list(pipe(
             messages,
             batch_size=self.batch_size,
-            max_new_tokens=64,
-            do_sample=True,
-            temperature=0.9,
-            top_p=0.95,
-        )
+        ))
 
         sentences = [
             output[0]['generated_text'][-1]['content'].strip()
@@ -52,15 +59,24 @@ class SentenceGenerator:
         return list(zip(sample_words, sentences))
 
     def generate(self, words):
-        middle = len(words) // 2
+        words_per_batch = self.batch_size // self.samples_per_word
+        futures = []
 
-        results = list(self.executor.map(
-            self.generate_batch,
-            self.pipes,
-            [words[:middle], words[middle:]],
-        ))
+        for index in range(0, len(words), words_per_batch):
+            gpu = len(futures) % 2
+            word_batch = words[index:index + words_per_batch]
 
-        return results[0] + results[1]
+            futures.append(self.executors[gpu].submit(
+                self.generate_batch,
+                self.pipes[gpu],
+                word_batch,
+            ))
+
+        return futures
+
+
+batch_size = 350
+samples_per_word = 3
 
 generator = SentenceGenerator(batch_size, samples_per_word)
 
@@ -71,8 +87,11 @@ with open('sentence_dataset.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['word', 'sentence'])
 
-    words_per_batch = batch_size // samples_per_word * 2
+    futures = generator.generate(words)
 
-    for index in tqdm(range(0, len(words), words_per_batch), desc='Batches'):
-        word_batch = words[index:index + words_per_batch]
-        writer.writerows(generator.generate(word_batch))
+    for future in tqdm(
+        as_completed(futures),
+        total=len(futures),
+        desc='Batches',
+    ):
+        writer.writerows(future.result())
