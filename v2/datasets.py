@@ -363,7 +363,7 @@ class SentenceGenerator:
 
 batch_size = 512
 samples_per_word = 3
-word_limit = 1000
+word_limit = 0
 
 generator = SentenceGenerator(batch_size, samples_per_word)
 
