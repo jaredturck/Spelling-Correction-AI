@@ -6,7 +6,7 @@ from trl import SFTTrainer, SFTConfig
 # accelerate launch --multi_gpu --num_processes=2 --mixed_precision=bf16 train.py
 
 model_name = 'Qwen/Qwen3-0.6B'
-dataset_path = '/mnt/8TB_HDD/datasets/spelling/sentence_dataset.csv'
+dataset_path = 'sentence_dataset.csv'
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -48,10 +48,10 @@ sft_config = SFTConfig(
     completion_only_loss=True,
     max_length=128,
     packing=True,
-    gradient_checkpointing=True,
+    gradient_checkpointing=False,
     logging_steps=50,
     save_strategy='steps',
-    save_steps=200,
+    save_steps=500,
     save_total_limit=3,
     dataloader_num_workers=8,
     dataloader_persistent_workers=True,
