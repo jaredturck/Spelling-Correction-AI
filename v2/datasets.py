@@ -28,18 +28,25 @@ class SentenceGenerator:
             pipe.generation_config.do_sample = True
             pipe.generation_config.temperature = 0.9
             pipe.generation_config.top_p = 0.95
-            pipe.tokenizer.clean_up_tokenization_spaces = False
 
         self.executor = ThreadPoolExecutor(max_workers=2)
 
         self.sentence_prompt = 'Return one sentence containing the word, sentence should be no more than 10 words: '
         self.misspelling_prompt = 'Return one realistic misspelling of the word. Return only the misspelled word: '
+        self.retry_prompt = 'Return exactly one realistic misspelling of the word. Return only one word with no spaces or explanation: '
+
+    def is_valid_misspelling(self, word, misspelling):
+        return (
+            misspelling
+            and not any(character.isspace() for character in misspelling)
+            and misspelling.lower() != word.lower()
+        )
 
     def replace_word(self, sentence, word, misspelling):
         match = re.search(rf'\b{re.escape(word)}\b', sentence, re.IGNORECASE)
 
         if not match:
-            return sentence
+            return None
 
         matched_word = match.group()
 
@@ -72,6 +79,7 @@ class SentenceGenerator:
         outputs = pipe(
             sentence_messages + misspelling_messages,
             batch_size=self.batch_size,
+            clean_up_tokenization_spaces=False,
         )
 
         sample_count = len(sample_words)
@@ -82,24 +90,91 @@ class SentenceGenerator:
         ]
 
         misspellings = [
-            output[0]['generated_text'][-1]['content'].strip().strip('.,!?;:"\'')
+            output[0]['generated_text'][-1]['content'].strip()
             for output in outputs[sample_count:]
         ]
 
-        incorrect_sentences = [
-            self.replace_word(sentence, word, misspelling)
-            for word, sentence, misspelling in zip(
-                sample_words,
-                sentences,
-                misspellings,
-            )
-        ]
+        rows = []
+        retry_samples = []
+        missing_words = 0
 
-        return list(zip(
+        for word, sentence, misspelling in zip(
             sample_words,
             sentences,
-            incorrect_sentences,
-        ))
+            misspellings,
+        ):
+            if not re.search(
+                rf'\b{re.escape(word)}\b',
+                sentence,
+                re.IGNORECASE,
+            ):
+                missing_words += 1
+                continue
+
+            if not self.is_valid_misspelling(word, misspelling):
+                retry_samples.append((word, sentence))
+                continue
+
+            incorrect_sentence = self.replace_word(
+                sentence,
+                word,
+                misspelling,
+            )
+
+            rows.append((
+                word,
+                sentence,
+                incorrect_sentence,
+            ))
+
+        return rows, retry_samples, missing_words
+
+    def retry_batch(self, pipe, samples):
+        messages = [
+            [
+                {'role': 'system', 'content': self.retry_prompt},
+                {'role': 'user', 'content': word}
+            ]
+            for word, sentence in samples
+        ]
+
+        outputs = pipe(
+            messages,
+            batch_size=self.batch_size,
+            clean_up_tokenization_spaces=False,
+        )
+
+        rows = []
+        discarded = 0
+
+        for sample, output in zip(samples, outputs):
+            word, sentence = sample
+
+            misspelling = (
+                output[0]['generated_text'][-1]['content'].strip()
+            )
+
+            if not self.is_valid_misspelling(word, misspelling):
+                discarded += 1
+                continue
+
+            incorrect_sentence = self.replace_word(
+                sentence,
+                word,
+                misspelling,
+            )
+
+            if incorrect_sentence is None:
+                discarded += 1
+                continue
+
+            rows.append((
+                word,
+                sentence,
+                incorrect_sentence,
+            ))
+
+        return rows, discarded
 
     def generate(self, words):
         batches = (
@@ -143,6 +218,15 @@ class SentenceGenerator:
 
                     futures[future] = gpu
 
+    def retry(self, samples):
+        for index in range(0, len(samples), self.batch_size):
+            sample_batch = samples[index:index + self.batch_size]
+
+            yield self.retry_batch(
+                self.pipes[0],
+                sample_batch,
+            )
+
 
 batch_size = 500
 samples_per_word = 3
@@ -160,17 +244,39 @@ total_batches = (
     len(words) + generator.words_per_batch - 1
 ) // generator.words_per_batch
 
+rows_skipped = 0
+retry_samples = []
+
 with open('sentence_dataset.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
+
     writer.writerow([
         'word',
         'correct_sentence',
         'incorrect_sentence',
     ])
 
-    for rows in tqdm(
+    for rows, failed_samples, missing in tqdm(
         generator.generate(words),
         total=total_batches,
         desc='Batches',
     ):
         writer.writerows(rows)
+
+        rows_skipped += missing
+        retry_samples.extend(failed_samples)
+
+    if retry_samples:
+        retry_batches = (
+            len(retry_samples) + batch_size - 1
+        ) // batch_size
+
+        for rows, discarded in tqdm(
+            generator.retry(retry_samples),
+            total=retry_batches,
+            desc='Retries',
+        ):
+            writer.writerows(rows)
+            rows_skipped += discarded
+
+print(f'Rows skipped: {rows_skipped}')
