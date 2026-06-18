@@ -4,3 +4,4 @@ datasets
 trl
 accelerate
 tqdm
+customtkinter
