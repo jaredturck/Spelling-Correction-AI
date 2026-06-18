@@ -36,22 +36,24 @@ dataset = Dataset.from_list(data)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     dtype=torch.bfloat16,
+    attn_implementation='flash_attention_2',
 )
 
 sft_config = SFTConfig(
     output_dir='./qwen_spelling_model',
     bf16=True,
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=4,
+    per_device_train_batch_size=16,
+    gradient_accumulation_steps=2,
     learning_rate=2e-5,
     num_train_epochs=1,
     completion_only_loss=True,
     max_length=128,
     packing=True,
     gradient_checkpointing=False,
+    ddp_find_unused_parameters=False,
     logging_steps=50,
     save_strategy='steps',
-    save_steps=500,
+    save_steps=200,
     save_total_limit=3,
     dataloader_num_workers=8,
     dataloader_persistent_workers=True,
