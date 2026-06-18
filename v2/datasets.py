@@ -75,7 +75,7 @@ class SentenceGenerator:
         return futures
 
 
-batch_size = 350
+batch_size = 500
 samples_per_word = 3
 
 generator = SentenceGenerator(batch_size, samples_per_word)
