@@ -1,4 +1,5 @@
 import csv
+import random
 import re
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -229,6 +230,43 @@ class SentenceGenerator:
 
         return rows, discarded
 
+    def generate_clean_batch(self, pipe, words):
+        messages = [
+            [
+                {'role': 'system', 'content': self.sentence_prompt},
+                {'role': 'user', 'content': word}
+            ]
+            for word in words
+        ]
+
+        outputs = pipe(
+            messages,
+            batch_size=self.batch_size,
+            clean_up_tokenization_spaces=False,
+        )
+
+        rows = []
+        retry_words = []
+
+        for word, output in zip(words, outputs):
+            sentence = output[0]['generated_text'][-1]['content'].strip()
+
+            if not re.search(
+                rf'\b{re.escape(word)}\b',
+                sentence,
+                re.IGNORECASE,
+            ):
+                retry_words.append(word)
+                continue
+
+            rows.append((
+                word,
+                sentence,
+                sentence,
+            ))
+
+        return rows, retry_words
+
     def generate(self, words):
         batches = (
             words[index:index + self.words_per_batch]
@@ -271,6 +309,48 @@ class SentenceGenerator:
 
                     futures[future] = gpu
 
+    def generate_clean(self, words):
+        batches = (
+            words[index:index + self.batch_size]
+            for index in range(0, len(words), self.batch_size)
+        )
+
+        futures = {}
+
+        for gpu in range(2):
+            word_batch = next(batches, None)
+
+            if word_batch:
+                future = self.executor.submit(
+                    self.generate_clean_batch,
+                    self.pipes[gpu],
+                    word_batch,
+                )
+
+                futures[future] = gpu
+
+        while futures:
+            completed, _ = wait(
+                futures,
+                return_when=FIRST_COMPLETED,
+            )
+
+            for future in completed:
+                gpu = futures.pop(future)
+
+                yield future.result()
+
+                word_batch = next(batches, None)
+
+                if word_batch:
+                    future = self.executor.submit(
+                        self.generate_clean_batch,
+                        self.pipes[gpu],
+                        word_batch,
+                    )
+
+                    futures[future] = gpu
+
     def retry(self, samples):
         for index in range(0, len(samples), self.batch_size):
             sample_batch = samples[index:index + self.batch_size]
@@ -281,7 +361,7 @@ class SentenceGenerator:
             )
 
 
-batch_size = 500
+batch_size = 512
 samples_per_word = 3
 word_limit = 1000
 
@@ -299,6 +379,7 @@ total_batches = (
 
 rows_skipped = 0
 retry_samples = []
+accepted_words = []
 
 with open('sentence_dataset.csv', 'w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
@@ -317,6 +398,7 @@ with open('sentence_dataset.csv', 'w', newline='', encoding='utf-8') as file:
         accepted_rows, duplicate_samples = generator.filter_rows(rows)
 
         writer.writerows(accepted_rows)
+        accepted_words.extend(row[0] for row in accepted_rows)
 
         retry_samples.extend(failed_samples)
         retry_samples.extend(duplicate_samples)
@@ -334,8 +416,32 @@ with open('sentence_dataset.csv', 'w', newline='', encoding='utf-8') as file:
             accepted_rows, duplicate_samples = generator.filter_rows(rows)
 
             writer.writerows(accepted_rows)
+            accepted_words.extend(row[0] for row in accepted_rows)
 
             rows_skipped += discarded
             rows_skipped += len(duplicate_samples)
+
+    clean_words = random.sample(
+        accepted_words,
+        len(accepted_words) // 2,
+    )
+
+    pending_clean_words = clean_words
+
+    with tqdm(
+        total=len(clean_words),
+        desc='Clean rows',
+    ) as progress:
+        while pending_clean_words:
+            retry_clean_words = []
+
+            for rows, failed_words in generator.generate_clean(
+                pending_clean_words,
+            ):
+                writer.writerows(rows)
+                progress.update(len(rows))
+                retry_clean_words.extend(failed_words)
+
+            pending_clean_words = retry_clean_words
 
 print(f'Rows skipped: {rows_skipped}')
